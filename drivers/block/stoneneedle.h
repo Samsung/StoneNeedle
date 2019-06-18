@@ -11,8 +11,8 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  */
-#ifndef _IOPATTERN_H
-#define _IOPATTERN_H
+#ifndef _STONENEEDLE_H
+#define _STONENEEDLE_H
 
 #include <linux/nvme.h>
 #include <linux/blkdev.h>
@@ -20,15 +20,14 @@
 /* StoneNeedle operation interfaces */
 struct stoneneedle_ops {
 	/* statistic calculation function */
-	void (*calc_iopattern) (char *, struct nvme_command, struct bio *);
+	void (*calc_stoneneedle) (char *, struct nvme_command, struct bio *);
 	/* cmd and data interface via proc */
-	int (*setup_iopattern) (struct gendisk *, const char *);
-	int (*release_iopattern) (const char *);
+	int (*setup_stoneneedle) (struct gendisk *, const char *);
+	void (*release_stoneneedle) (const char *);
 };
 
-int register_stoneneedle(int iopattern_chunk_size,
-			 struct stoneneedle_ops *sn_ops);
+int register_stoneneedle(int, struct stoneneedle_ops *);
 
-void unregister_stoneneedle(void);
+void unregister_stoneneedle(struct stoneneedle_ops *);
 
 #endif
