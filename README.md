@@ -15,6 +15,3 @@ https://github.com/Samsung/StoneNeedle/wiki
 - Li Sun, li1.sun@samsung.com
 - Wei Xia, wei85.xia@samsung.com
 - Yanlong Yang, yanl13.yang@samsung.com
-
-## 4. Governance
-All decisions in this project are made by consensus, respecting the principles and rules of the community. Please refer to the Samsung Inner Source Governance in more detail.
