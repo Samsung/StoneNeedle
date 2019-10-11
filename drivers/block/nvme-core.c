@@ -43,6 +43,19 @@
 #include <scsi/sg.h>
 #include <asm-generic/io-64-nonatomic-lo-hi.h>
 
+/* StoneNeedle header files, module params and global variables */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include "stoneneedle.h"
+
+unsigned int stoneneedle_chunk_size = 100;
+EXPORT_SYMBOL_GPL(stoneneedle_chunk_size);
+module_param(stoneneedle_chunk_size, int, 0644);
+struct stoneneedle_ops sn_ops;
+MODULE_PARM_DESC(stoneneedle_chunk_size, " 100, 1000, 10000(default 100)");
+#endif /* CONFIG_BLK_DEV_STONENEEDLE */
+
 #define NVME_Q_DEPTH 1024
 #define SQ_SIZE(depth)		(depth * sizeof(struct nvme_command))
 #define CQ_SIZE(depth)		(depth * sizeof(struct nvme_completion))
@@ -85,7 +98,6 @@ struct nvme_queue {
 	u8 q_suspended;
 	unsigned long cmdid_data[];
 };
-
 /*
  * Check we didin't inadvertently grow the command struct
  */
@@ -728,6 +740,12 @@ static int nvme_submit_bio_queue(struct nvme_queue *nvmeq, struct nvme_ns *ns,
 	cmnd->rw.control = cpu_to_le16(control);
 	cmnd->rw.dsmgmt = cpu_to_le32(dsmgmt);
 
+	/* StoneNeedle calculation */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+	if (sn_ops.calc_stoneneedle)
+		sn_ops.calc_stoneneedle(ns->disk->disk_name, *cmnd, bio);
+#endif /* CONFIG_BLK_DEV_STONENEEDLE */
+
 	nvme_start_io_acct(bio);
 	if (++nvmeq->sq_tail == nvmeq->q_depth)
 		nvmeq->sq_tail = 0;
@@ -735,11 +753,11 @@ static int nvme_submit_bio_queue(struct nvme_queue *nvmeq, struct nvme_ns *ns,
 
 	return 0;
 
- free_cmdid:
+free_cmdid:
 	free_cmdid(nvmeq, cmdid, NULL);
- free_iod:
+free_iod:
 	nvme_free_iod(nvmeq->dev, iod);
- nomem:
+nomem:
 	return result;
 }
 
@@ -1703,7 +1721,17 @@ static struct nvme_ns *nvme_alloc_ns(struct nvme_dev *dev, unsigned nsid,
 	disk->queue = ns->queue;
 	disk->driverfs_dev = &dev->pci_dev->dev;
 	sprintf(disk->disk_name, "nvme%dn%d", dev->instance, nsid);
+	
 	set_capacity(disk, le64_to_cpup(&id->nsze) << (ns->lba_shift - 9));
+
+    /* Setup StoneNeedle for device */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+	if (sn_ops.setup_stoneneedle) {
+		if (sn_ops.setup_stoneneedle(disk, disk->disk_name) < 0)
+			pr_err("setup_stoneneedle: %s failed!!!\n",
+			       disk->disk_name);
+	}
+#endif /* CONFIG_BLK_DEV_STONENEEDLE */
 
 	if (dev->oncs & NVME_CTRL_ONCS_DSM)
 		nvme_config_discard(ns);
@@ -2009,6 +2037,13 @@ static void nvme_dev_remove(struct nvme_dev *dev)
 
 	list_for_each_entry_safe(ns, next, &dev->namespaces, list) {
 		list_del(&ns->list);
+
+    /* Release StoneNeedle */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+	if (sn_ops.release_stoneneedle)
+	    sn_ops.release_stoneneedle(ns->disk->disk_name);
+#endif /* CONFIG_BLK_DEV_STONENEEDLE */
+
 		del_gendisk(ns->disk);
 		nvme_ns_free(ns);
 	}
@@ -2294,9 +2329,16 @@ static int __init nvme_init(void)
 	else if (result > 0)
 		nvme_major = result;
 
+	/* StoneNeedle init */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+	result = register_stoneneedle(stoneneedle_chunk_size, &sn_ops);
+	if (result)
+		pr_err("Register StoneNeedle failed, code: %d\n", result);
+#endif  /* CONFIG_BLK_DEV_STONENEEDLE */
 	result = pci_register_driver(&nvme_driver);
 	if (result)
 		goto unregister_blkdev;
+
 	return 0;
 
  unregister_blkdev:
@@ -2309,6 +2351,12 @@ static int __init nvme_init(void)
 static void __exit nvme_exit(void)
 {
 	pci_unregister_driver(&nvme_driver);
+
+	/* StoneNeedle exit */
+#ifdef CONFIG_BLK_DEV_STONENEEDLE
+	unregister_stoneneedle(&sn_ops);
+#endif  /* CONFIG_BLK_DEV_STONENEEDLE */
+
 	unregister_blkdev(nvme_major, "nvme");
 	kthread_stop(nvme_thread);
 }
