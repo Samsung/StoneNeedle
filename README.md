@@ -13,5 +13,8 @@ https://github.com/Samsung/StoneNeedle/wiki
 
 ## 3. Committers
 - Li Sun, li1.sun@samsung.com
-- Wei Xia, wei85.xia@samsung.com
+- Junke Li, junke.li@samsung.com
 - Yanlong Yang, yanl13.yang@samsung.com
+
+## 4. Note
+If you have any questions, just use github's comment system and we'll get back to you as soon as possible.
