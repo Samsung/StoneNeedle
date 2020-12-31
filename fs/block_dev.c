@@ -184,6 +184,10 @@ static unsigned int dio_bio_write_op(struct kiocb *iocb)
 	/* avoid the need for a I/O completion work item */
 	if (iocb->ki_flags & IOCB_DSYNC)
 		op |= REQ_FUA;
+	
+	if (iocb->ki_flags & IOCB_ZONE_APPEND)
+		op |= REQ_OP_ZONE_APPEND;
+
 	return op;
 }
 
@@ -294,6 +298,14 @@ static int blkdev_iopoll(struct kiocb *kiocb, bool wait)
 	return blk_poll(q, READ_ONCE(kiocb->ki_cookie), wait);
 }
 
+static inline long blkdev_bio_end_io_append(struct bio *bio)
+{
+	sector_t zone_sectors = blk_queue_zone_sectors(bio->bi_disk->queue);
+
+	/* calculate zone relative offset for zone append */
+	return bio->bi_iter.bi_sector & (zone_sectors - 1);
+}
+
 static void blkdev_bio_end_io(struct bio *bio)
 {
 	struct blkdev_dio *dio = bio->bi_private;
@@ -306,15 +318,19 @@ static void blkdev_bio_end_io(struct bio *bio)
 		if (!dio->is_sync) {
 			struct kiocb *iocb = dio->iocb;
 			ssize_t ret;
+			long res2 = 0;
 
 			if (likely(!dio->bio.bi_status)) {
 				ret = dio->size;
 				iocb->ki_pos += ret;
+				if (iocb->ki_flags & IOCB_ZONE_APPEND)
+					res2 = blkdev_bio_end_io_append(bio);
 			} else {
 				ret = blk_status_to_errno(dio->bio.bi_status);
 			}
 
-			dio->iocb->ki_complete(iocb, ret, 0);
+			//dio->iocb->ki_complete(iocb, ret, 0);
+			dio->iocb->ki_complete(iocb, ret, res2);
 			if (dio->multi_bio)
 				bio_put(&dio->bio);
 		} else {
@@ -381,6 +397,7 @@ __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter, int nr_pages)
 		bio->bi_private = dio;
 		bio->bi_end_io = blkdev_bio_end_io;
 		bio->bi_ioprio = iocb->ki_ioprio;
+		bio->bi_opf = is_read ? REQ_OP_READ : dio_bio_write_op(iocb);
 
 		ret = bio_iov_iter_get_pages(bio, iter);
 		if (unlikely(ret)) {
@@ -390,11 +407,11 @@ __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter, int nr_pages)
 		}
 
 		if (is_read) {
-			bio->bi_opf = REQ_OP_READ;
+			//bio->bi_opf = REQ_OP_READ;
 			if (dio->should_dirty)
 				bio_set_pages_dirty(bio);
 		} else {
-			bio->bi_opf = dio_bio_write_op(iocb);
+			//bio->bi_opf = dio_bio_write_op(iocb);
 			task_io_account_write(bio->bi_iter.bi_size);
 		}
 
@@ -464,12 +481,17 @@ __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter, int nr_pages)
 static ssize_t
 blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
+	bool is_sync = is_sync_kiocb(iocb);
 	int nr_pages;
+	/* zone-append is supported only on async-kiocb */
+	if (is_sync && iocb->ki_flags & IOCB_ZONE_APPEND)
+		return -EINVAL;
 
 	nr_pages = iov_iter_npages(iter, BIO_MAX_PAGES + 1);
 	if (!nr_pages)
 		return 0;
-	if (is_sync_kiocb(iocb) && nr_pages <= BIO_MAX_PAGES)
+	//if (is_sync_kiocb(iocb) && nr_pages <= BIO_MAX_PAGES)
+	if (is_sync && nr_pages <= BIO_MAX_PAGES)
 		return __blkdev_direct_IO_simple(iocb, iter, nr_pages);
 
 	return __blkdev_direct_IO(iocb, iter, min(nr_pages, BIO_MAX_PAGES));

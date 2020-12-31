@@ -402,6 +402,8 @@ struct io_rw {
 	struct kiocb			kiocb;
 	u64				addr;
 	u64				len;
+    /* zone-relative offset for append, in sectors */
+    u32             append_offset;
 };
 
 struct io_connect {
@@ -541,6 +543,7 @@ enum {
 	REQ_F_NO_FILE_TABLE_BIT,
 	REQ_F_QUEUE_TIMEOUT_BIT,
 	REQ_F_WORK_INITIALIZED_BIT,
+	REQ_F_ZONE_APPEND_BIT,
 	REQ_F_TASK_PINNED_BIT,
 
 	/* not a real bit, just to check we're not overflowing the space */
@@ -599,6 +602,8 @@ enum {
 	REQ_F_QUEUE_TIMEOUT	= BIT(REQ_F_QUEUE_TIMEOUT_BIT),
 	/* io_wq_work is initialized */
 	REQ_F_WORK_INITIALIZED	= BIT(REQ_F_WORK_INITIALIZED_BIT),
+    /* to return zone relative offset for zone append*/
+    REQ_F_ZONE_APPEND       = BIT(REQ_F_ZONE_APPEND_BIT),
 	/* req->task is refcounted */
 	REQ_F_TASK_PINNED	= BIT(REQ_F_TASK_PINNED_BIT),
 };
@@ -1781,6 +1786,8 @@ static void io_iopoll_complete(struct io_ring_ctx *ctx, unsigned int *nr_events,
 
 		if (req->flags & REQ_F_BUFFER_SELECTED)
 			cflags = io_put_kbuf(req);
+        if (req->flags & REQ_F_ZONE_APPEND)
+            cflags = req->rw.append_offset;
 
 		__io_cqring_fill_event(req, req->result, cflags);
 		(*nr_events)++;
@@ -1959,7 +1966,8 @@ static inline void req_set_fail_links(struct io_kiocb *req)
 		req->flags |= REQ_F_FAIL_LINK;
 }
 
-static void io_complete_rw_common(struct kiocb *kiocb, long res)
+//static void io_complete_rw_common(struct kiocb *kiocb, long res)
+static void io_complete_rw_common(struct kiocb *kiocb, long res, long res2)
 {
 	struct io_kiocb *req = container_of(kiocb, struct io_kiocb, rw.kiocb);
 	int cflags = 0;
@@ -1969,8 +1977,14 @@ static void io_complete_rw_common(struct kiocb *kiocb, long res)
 
 	if (res != req->result)
 		req_set_fail_links(req);
+
 	if (req->flags & REQ_F_BUFFER_SELECTED)
 		cflags = io_put_kbuf(req);
+
+	/* use cflags to return zone append completion result */
+    if (req->flags & REQ_F_ZONE_APPEND)
+        cflags = res2;
+
 	__io_cqring_add_event(req, res, cflags);
 }
 
@@ -1978,7 +1992,8 @@ static void io_complete_rw(struct kiocb *kiocb, long res, long res2)
 {
 	struct io_kiocb *req = container_of(kiocb, struct io_kiocb, rw.kiocb);
 
-	io_complete_rw_common(kiocb, res);
+	//io_complete_rw_common(kiocb, res);
+	io_complete_rw_common(kiocb, res, res2);
 	io_put_req(req);
 }
 
@@ -1991,6 +2006,9 @@ static void io_complete_rw_iopoll(struct kiocb *kiocb, long res, long res2)
 
 	if (res != -EAGAIN && res != req->result)
 		req_set_fail_links(req);
+	
+	if (req->flags & REQ_F_ZONE_APPEND)
+		req->rw.append_offset = res2;
 
 	WRITE_ONCE(req->result, res);
 	/* order with io_poll_complete() checking ->result */
@@ -2146,6 +2164,9 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 	/* don't allow async punt if RWF_NOWAIT was requested */
 	if (kiocb->ki_flags & IOCB_NOWAIT)
 		req->flags |= REQ_F_NOWAIT;
+
+	if (kiocb->ki_flags & IOCB_ZONE_APPEND)
+		req->flags |= REQ_F_ZONE_APPEND;
 
 	if (force_nonblock)
 		kiocb->ki_flags |= IOCB_NOWAIT;
@@ -2429,6 +2450,14 @@ static ssize_t io_import_iovec(int rw, struct io_kiocb *req,
 
 	opcode = req->opcode;
 	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED) {
+		/*
+		* fixed-buffers not supported for zone-append.
+		* This check can be removed when block-layer starts
+		* supporting append with iov_iter of bvec type
+		*/
+		if (req->flags == REQ_F_ZONE_APPEND)
+			return -EINVAL;
+		
 		*iovec = NULL;
 		return io_import_fixed(req, rw, iter);
 	}
