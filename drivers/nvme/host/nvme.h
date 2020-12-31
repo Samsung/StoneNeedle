@@ -141,6 +141,11 @@ struct nvme_request {
 	u8			retries;
 	u8			flags;
 	u16			status;
+	/* StoneNeedle */
+#ifdef CONFIG_NVME_STONENEEDLE
+	u8			seq;
+	u64         interval;
+#endif /* CONFIG_NVME_STONENEEDLE */
 	struct nvme_ctrl	*ctrl;
 };
 
@@ -498,6 +503,9 @@ static inline void nvme_end_request(struct request *req, __le16 status,
 	rq->result = result;
 	/* inject error when permitted by fault injection framework */
 	nvme_should_fail(req);
+	/*if (unlikely(blk_should_fake_timeout(req->q)))
+		return true;*/
+//	blk_mq_complete_request_remote(req);
 	blk_mq_complete_request(req);
 }
 
@@ -760,5 +768,11 @@ void nvme_hwmon_init(struct nvme_ctrl *ctrl);
 #else
 static inline void nvme_hwmon_init(struct nvme_ctrl *ctrl) { }
 #endif
+
+#ifdef CONFIG_NVME_STONENEEDLE
+void nvme_register_stoneneedle(void *ops);
+void nvme_unregister_stoneneedle(void);
+#endif
+
 
 #endif /* _NVME_H */

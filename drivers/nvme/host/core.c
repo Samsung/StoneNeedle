@@ -30,6 +30,73 @@
 
 #define NVME_MINORS		(1U << MINORBITS)
 
+/* StoneNeedle header files, module params and global variables */
+#ifdef CONFIG_NVME_STONENEEDLE
+#include "stoneneedle.h"
+static struct stoneneedle_ops *sn_ops = NULL;
+struct nvme_stoneneedle_dev {
+	struct gendisk *disk;
+	struct list_head list;
+};
+
+struct nvme_stoneneedle_dev_list {
+	struct list_head dev_list;
+	int dev_num;
+};
+
+static struct nvme_stoneneedle_dev_list *nvme_stoneneedle_dev_list = NULL;
+
+static struct nvme_stoneneedle_dev *find_stoneneedle_dev(const char *dev_name)
+{
+	struct nvme_stoneneedle_dev *dev;
+	if(nvme_stoneneedle_dev_list) {
+		list_for_each_entry(dev, &nvme_stoneneedle_dev_list->dev_list, list) {
+		if (strstr (dev_name, dev->disk->disk_name) != NULL)
+			return dev;
+		}
+	}
+	return NULL;
+}
+
+static void add_stoneneedle_disk(struct gendisk *disk) {
+	struct nvme_stoneneedle_dev *dev;
+	if (nvme_stoneneedle_dev_list) {
+		dev = kzalloc(sizeof(struct nvme_stoneneedle_dev), GFP_ATOMIC);
+		if(dev) {
+			dev->disk = disk;
+			list_add_tail(&dev->list, &nvme_stoneneedle_dev_list->dev_list);
+			nvme_stoneneedle_dev_list->dev_num++;
+		}
+	}
+}
+
+static void remove_stoneneedle_disk(const char *dev_name) {
+	struct nvme_stoneneedle_dev *dev = find_stoneneedle_dev(dev_name);
+	if(dev) {
+		list_del(&dev->list);
+		kfree(dev);
+		nvme_stoneneedle_dev_list->dev_num--;
+	}
+}
+
+void nvme_register_stoneneedle(void *ops)
+{
+	struct nvme_stoneneedle_dev *dev;
+	sn_ops = (struct stoneneedle_ops *)ops;
+	list_for_each_entry(dev, &nvme_stoneneedle_dev_list->dev_list, list) {
+		if(sn_ops->setup_stoneneedle(dev->disk, dev->disk->disk_name) < 0)
+			pr_err("setup_stoneneedle : %s failed!!!\n", dev->disk->disk_name);
+	}
+}
+EXPORT_SYMBOL_GPL(nvme_register_stoneneedle);
+
+void nvme_unregister_stoneneedle(void)
+{
+	sn_ops = NULL;
+}
+EXPORT_SYMBOL_GPL(nvme_unregister_stoneneedle);
+#endif /* CONFIG_NVME_STONENEEDLE */
+
 unsigned int admin_timeout = 60;
 module_param(admin_timeout, uint, 0644);
 MODULE_PARM_DESC(admin_timeout, "timeout in seconds for admin commands");
@@ -292,6 +359,14 @@ void nvme_complete_rq(struct request *req)
 		req->__sector = nvme_lba_to_sect(req->q->queuedata,
 			le64_to_cpu(nvme_req(req)->result.u64));
 	}
+	
+	/* StoneNeedle calculation */
+#ifdef CONFIG_NVME_STONENEEDLE
+	if (sn_ops && status == BLK_STS_OK 
+		&& (req_op(req) == REQ_OP_ZONE_APPEND 
+		|| req_op(req) == REQ_OP_WRITE))
+		sn_ops->calc_stoneneedle(req->q->queuedata, req, 1);
+#endif /* CONFIG_NVME_STONENEEDLE */
 
 	nvme_trace_bio_complete(req, status);
 	blk_mq_end_request(req, status);
@@ -730,6 +805,13 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 
 	cmnd->rw.control = cpu_to_le16(control);
 	cmnd->rw.dsmgmt = cpu_to_le32(dsmgmt);
+	
+	/* StoneNeedle calculation */
+#ifdef CONFIG_NVME_STONENEEDLE
+	if (sn_ops)
+		sn_ops->calc_stoneneedle(ns, req, 0);
+#endif /* CONFIG_NVME_STONENEEDLE */
+
 	return 0;
 }
 
@@ -3834,6 +3916,15 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 	nvme_mpath_add_disk(ns, id);
 	nvme_fault_inject_init(&ns->fault_inject, ns->disk->disk_name);
 	kfree(id);
+	
+	/* Setup StoneNeedle for device */
+#ifdef CONFIG_NVME_STONENEEDLE
+	add_stoneneedle_disk(disk);
+	if (sn_ops) {
+		if (sn_ops->setup_stoneneedle(disk, disk->disk_name) < 0)
+			pr_err("setup_stoneneedle : %s failed!!!\n", disk->disk_name);
+	}
+#endif /* CONFIG_NVME_STONENEEDLE */
 
 	return;
  out_put_disk:
@@ -4062,8 +4153,15 @@ void nvme_remove_namespaces(struct nvme_ctrl *ctrl)
 	list_splice_init(&ctrl->namespaces, &ns_list);
 	up_write(&ctrl->namespaces_rwsem);
 
-	list_for_each_entry_safe(ns, next, &ns_list, list)
+	list_for_each_entry_safe(ns, next, &ns_list, list) {
+		/* Release StoneNeedle */
+#ifdef CONFIG_NVME_STONENEEDLE
+		remove_stoneneedle_disk(ns->disk->disk_name);
+		if (sn_ops)
+            sn_ops->release_stoneneedle(ns->disk->disk_name);
+#endif /* CONFIG_NVME_STONENEEDLE */
 		nvme_ns_remove(ns);
+	}
 }
 EXPORT_SYMBOL_GPL(nvme_remove_namespaces);
 
@@ -4561,6 +4659,16 @@ static int __init nvme_core_init(void)
 		result = PTR_ERR(nvme_subsys_class);
 		goto destroy_class;
 	}
+
+#ifdef CONFIG_NVME_STONENEEDLE	
+	nvme_stoneneedle_dev_list = kzalloc(sizeof(struct nvme_stoneneedle_dev_list), GFP_ATOMIC);
+	if (likely(nvme_stoneneedle_dev_list)) {
+		INIT_LIST_HEAD(&nvme_stoneneedle_dev_list->dev_list);
+	} else {
+		pr_err("StoneNeedle: nvme_stoneneedle_dev_list memory allocation error.\n");
+	}
+#endif /* CONFIG_NVME_STONENEEDLE */
+
 	return 0;
 
 destroy_class:
@@ -4579,6 +4687,17 @@ out:
 
 static void __exit nvme_core_exit(void)
 {
+#ifdef CONFIG_NVME_STONENEEDLE	
+	struct nvme_stoneneedle_dev *dev;
+	if(nvme_stoneneedle_dev_list) {
+		list_for_each_entry(dev, &nvme_stoneneedle_dev_list->dev_list, list) {
+			list_del(&dev->list);
+			kfree(dev);
+			nvme_stoneneedle_dev_list->dev_num--;
+		}
+		kfree(nvme_stoneneedle_dev_list);
+	}
+#endif /* CONFIG_NVME_STONENEEDLE */
 	class_destroy(nvme_subsys_class);
 	class_destroy(nvme_class);
 	unregister_chrdev_region(nvme_chr_devt, NVME_MINORS);

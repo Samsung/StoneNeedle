@@ -83,3 +83,13 @@ config NVME_TCP
 	  from https://github.com/linux-nvme/nvme-cli.
 
 	  If unsure, say N.
+	  
+config STONENEEDLE
+	tristate
+	default m
+
+config NVME_STONENEEDLE
+	bool "stoneneedle driver"
+	depends on STONENEEDLE
+	help
+	  stoneneedle help.
